@@ -6,13 +6,9 @@ Param(
     [Parameter(Mandatory = $true)][string] $ResourceGroupLocation,
     [Parameter(Mandatory = $true)][string] $StorageAccountName,
     [Parameter(Mandatory = $false)][string] $StorageContainerName = 'artifacts',
-    [Parameter(Mandatory = $false)][string] $artifactsFolderName = 'artifacts',
+    [Parameter(Mandatory = $false)][string] $ArtifactsPath = 'artifacts',
     [switch] $GenerateSAS
 )
-
-
-Write-Host "##vso[task.setvariable variable=sauce]crushed tomatoes"
-
 
 $Global:TokenSets = $null
 $ErrorActionPreference = 'Stop'
@@ -30,9 +26,9 @@ write-warning "Context Environment= $($context.Environment)"
 write-warning "Context Tenant id  = $($context.Tenant.Id)"
 
 
-# Create or update the resource group using the specified template file and template parameters file
-New-AzureRmResourceGroup -Name $ResourceGroupName -Location $ResourceGroupLocation -Verbose -Force
-$artifactsRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($PSScriptRoot, $artifactsFolderName))
+
+$resourceGroupOutput = New-AzureRmResourceGroup -Name $ResourceGroupName -Location $ResourceGroupLocation -Verbose -Force
+$artifactsRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($PSScriptRoot, $ArtifactsPath))
 $storageAccount = Get-AzureRmStorageAccount -Name $StorageAccountName -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
 if (!$storageAccount) {
     Write-Output 'Creating new storage account, please wait...'
@@ -49,39 +45,46 @@ if (!$storageContainer) {
 }
 $storageKey = (Get-AzureRmStorageAccountKey -ResourceGroupName $ResourceGroupName -Name $StorageAccountName)[0].Value.ToString()
 
-Write-Host "##vso[task.setvariable variable=storageKey;issecret=true]$storageKey"
-
-$ArtifactFilePaths = Get-ChildItem $artifactsRoot
-foreach ($SourcePath in $ArtifactFilePaths) {
-   
-    if ([System.IO.FileAttributes]::Directory -eq $SourcePath.Attributes) {
-        
-        $nonRunbookFiles = Get-ChildItem $SourcePath.FullName -Recurse -File
-        $rbTempArrayList = new-object system.collections.arraylist
-        foreach ($f in $nonRunbookFiles) {
+Write-Host "##vso[task.setvariable variable=STORAGEKEY;issecret=true]$storageKey"
+function traverse($rootPath) {
+    $children = Get-ChildItem $rootPath
+    foreach ($child in $children) {        
+        if ([System.IO.FileAttributes]::Directory -eq $child.Attributes) {
+            traverse $child.FullName
+        }
+        else {
+            $sasOutput = uploadFile -filePath $child.Fullname -blobName $child.FullName.Replace($artifactsRoot + '\', '').Replace('\', '/') `
+                -containerName $StorageContainerName -storageAccountContext $storageAccount.Context
             
-            Set-AzureStorageBlobContent -File $f.FullName -Blob $f.FullName.Substring($SourcePath.FullName.length + 1) `
-                -Container $StorageContainerName -Context $storageAccount.Context -Force
-                
             if ($GenerateSAS) {
-                $sasToken = New-AzureStorageAccountSASToken -Service Blob -ResourceType Object -Permission "r" -ExpiryTime ((Get-Date).AddMinutes(20)) -Context $storageAccount.Context
-                $absuriTemp = -join ( (Get-AzureStorageBlob -blob $Blob -Container $StorageContainerName -Context $storageAccount.Context).ICloudBlob.uri.AbsoluteUri, $sasToken)
-        
-                         
-                $rbTemp = @{
-                    runbookName = $runbook.BaseName.ToString();
-                    runbookUri  = $absuriTemp.ToString();	
-                };
-                $rbTempArrayList.Add($rbTemp)
+                $envVarName = $child.FullName.Replace($PSScriptRoot, '').Replace('\', '').Replace('.', '').ToUpper();
+                Write-Host "##vso[task.setvariable variable=$envVarName;issecret=true]$sasOutput"
             }
         }
-        
-        Write-Output $SourcePath.FullName			
-    }
-    else {			
-        Set-AzureStorageBlobContent -File $SourcePath.FullName -Blob $SourcePath.FullName.Substring($artifactsRoot.length + 1) `
-            -Container $StorageContainerName -Context $storageAccount.Context -Force
     }
 }
+function uploadFile($filePath, $blobName, $containerName, $storageAccountContext) {
+    $blobOutput = Set-AzureStorageBlobContent -File $filePath -Blob $blobName `
+        -Container $containerName -Context $storageAccountContext -Force
+            
+    if ($GenerateSAS) {
+        $sasToken = New-AzureStorageAccountSASToken -Service Blob -ResourceType Object -Permission "r" -ExpiryTime ((Get-Date).AddMinutes(20)) -Context $storageAccountContext
+        $b = Get-AzureStorageBlob -blob $blobName -Container $containerName -Context $storageAccountContext
+        $absuriTemp = -join ($b.ICloudBlob.uri.AbsoluteUri, $sasToken)
+        return $absuriTemp;
+    }
+    return $null
+}
+traverse $artifactsRoot
+# foreach ($SourcePath in $ArtifactFilePaths) {
+#     Write-Output $SourcePath
+#     $nonRunbookFiles = Get-ChildItem $SourcePath.FullName -Recurse -File
+    
+#     foreach ($f in $nonRunbookFiles) {
+
+#     }
+        
+    
+# }
         
 $Global:TokenSets = $null
